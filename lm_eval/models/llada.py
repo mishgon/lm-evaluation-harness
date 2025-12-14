@@ -74,11 +74,12 @@ def generate(
         cfg_scale: float = 0.,
         remasking: Literal['random', 'low_confidence'] = 'low_confidence'
 ) -> torch.Tensor:
-    x = torch.full((input_ids.shape[0], input_ids.shape[1] + gen_length), mask_token_id, dtype=torch.long).to(model.device)
+    device = model.device
+    x = torch.full((input_ids.shape[0], input_ids.shape[1] + gen_length), mask_token_id, dtype=torch.long, device=device)
     x[:, :input_ids.shape[1]] = input_ids.clone()
 
     if attention_mask is not None:
-        attention_mask = torch.cat([attention_mask, torch.ones((input_ids.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
+        attention_mask = torch.cat([attention_mask, torch.ones((input_ids.shape[0], gen_length), dtype=attention_mask.dtype, device=device)], dim=-1)
 
     prompt_index = (x != mask_token_id)
 
@@ -161,15 +162,16 @@ class LLaDA(LM):
         self.model = AutoModel.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True,
                                                dtype=torch.bfloat16, **model_kwargs)
         self.model.eval()
-
-        self.device = torch.device(device)
         if self.accelerator is not None:
             self.model = self.accelerator.prepare(self.model)
             self.device = torch.device(f'{self.accelerator.device}')
             self._rank = self.accelerator.local_process_index
             self._world_size = self.accelerator.num_processes
-        else: 
+        else:
             self.model = self.model.to(device)
+            self.device = torch.device(device)
+            self._rank = 0
+            self._world_size = 1
 
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         if self.tokenizer.padding_side != "left":
@@ -203,7 +205,7 @@ class LLaDA(LM):
         raise NotImplementedError
 
     # based on lm_eval.models.huggingface.HFLM
-    def generate_until(self, requests: List[Instance], disable_tqdm: bool = False) -> List[str]:
+    def generate_until(self, requests: List[Instance]) -> List[str]:
         generated_texts = []
 
         def _collate(req: tuple[str, dict]):
@@ -219,7 +221,6 @@ class LLaDA(LM):
 
         pbar = tqdm(
             total=len(requests),
-            disable=(disable_tqdm or (self.rank != 0)),
             desc="Running generate_until requests",
         )
 
