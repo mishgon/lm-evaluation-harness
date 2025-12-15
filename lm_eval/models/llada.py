@@ -2,13 +2,14 @@ import copy
 import logging
 from typing import Optional, Literal, Tuple, Union, List, Dict
 from tqdm import tqdm
+from datetime import timedelta
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import jinja2
 from transformers import AutoTokenizer, AutoModel
-import accelerate
+from accelerate import Accelerator, InitProcessGroupKwargs
 
 from lm_eval.api.model import LM
 from lm_eval.api.instance import Instance
@@ -149,29 +150,27 @@ class LLaDA(LM):
     ):
         super().__init__()
 
-        accelerator = accelerate.Accelerator()
+        accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(weeks=52))
+        accelerator = Accelerator(kwargs_handlers=[accelerator_kwargs])
         if accelerator.num_processes > 1:
             self.accelerator = accelerator
-        else:
-            self.accelerator = None
-
-        model_kwargs = {}
-        if self.accelerator is not None:
-            model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
-
-        self.model = AutoModel.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True,
-                                               dtype=torch.bfloat16, **model_kwargs)
-        self.model.eval()
-        if self.accelerator is not None:
-            self.model = self.accelerator.prepare(self.model)
             self.device = torch.device(f'{self.accelerator.device}')
             self._rank = self.accelerator.local_process_index
             self._world_size = self.accelerator.num_processes
         else:
-            self.model = self.model.to(device)
+            self.accelerator = None
             self.device = torch.device(device)
             self._rank = 0
             self._world_size = 1
+
+        model_kwargs = {}
+        if self.accelerator is not None:
+            model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
+        self.model = AutoModel.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True,
+                                               dtype=torch.bfloat16, **model_kwargs)
+        self.model.eval()
+        if self.accelerator is None:
+            self.model = self.model.to(device)
 
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         if self.tokenizer.padding_side != "left":
@@ -279,9 +278,6 @@ class LLaDA(LM):
         generated_texts = collator.get_original(generated_texts)
         
         pbar.close()
-
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
 
         return generated_texts
 
